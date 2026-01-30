@@ -1,0 +1,17 @@
+{
+  "names": [
+    "Wall",
+    "Door",
+    "Window",
+    "Column"
+  ],
+  "merge": {
+    "Sliding Door": "Door"
+  },
+  "enabled": {
+    "Wall": true,
+    "Door": true,
+    "Window": true,
+    "Column": false
+  }
+}
