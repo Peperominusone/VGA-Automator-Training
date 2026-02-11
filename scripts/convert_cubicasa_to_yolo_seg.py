@@ -326,8 +326,10 @@ def main():
     for split, split_pairs_list in [("train", train_pairs), ("val", val_pairs)]:
         ensure_dirs(out_root, split)
         for img_path, svg_path in tqdm(split_pairs_list, desc=f"Converting {split}"):
-            out_img = out_root / "images" / split / img_path.name
-            out_lbl = out_root / "labels" / split / (img_path.stem + ".txt")
+            # Create unique filename using parent directory name
+            unique_name = f"{img_path.parent.name}_{img_path.name}"
+            out_img = out_root / "images" / split / unique_name
+            out_lbl = out_root / "labels" / split / (img_path.parent.name + "_" + img_path.stem + ".txt")
             convert_one(img_path, svg_path, out_img, out_lbl, cfg)
 
     print(f"[OK] YOLO-seg dataset created at: {out_root}")
