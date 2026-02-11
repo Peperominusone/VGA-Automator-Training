@@ -18,12 +18,17 @@ Notes:
 
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import yaml
+from lxml import etree
+from PIL import Image
 from tqdm import tqdm
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def load_class_config(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -43,39 +48,248 @@ def write_data_yaml(out_root: Path, names: List[str]):
 
 def svg_to_yolo_polygons(svg_path: Path, img_w: int, img_h: int, class_cfg: Dict):
     """
-    TODO: Implement SVG parsing for CubiCasa5k.
+    Parse CubiCasa5k SVG files to extract polygons.
 
     Return:
       List[Tuple[class_id, List[float]]] where coords are normalized polygon points:
         [x1, y1, x2, y2, ...] in 0..1
     """
-    # Placeholder: return no labels
-    return []
+    polygons = []
+    
+    try:
+        # Parse SVG file
+        tree = etree.parse(str(svg_path))
+        root = tree.getroot()
+        
+        # Get SVG namespace
+        ns = {'svg': 'http://www.w3.org/2000/svg'}
+        if root.tag.startswith('{'):
+            ns_url = root.tag.split('}')[0].strip('{')
+            ns = {'svg': ns_url}
+        
+        # Build class name to ID mapping
+        names = class_cfg.get("names", [])
+        merge = class_cfg.get("merge", {})
+        enabled = class_cfg.get("enabled", {})
+        
+        # Create mapping: class_name -> class_id
+        class_to_id = {}
+        for idx, name in enumerate(names):
+            if enabled.get(name, True):
+                class_to_id[name] = idx
+        
+        # Helper function to normalize class name
+        def get_class_id(svg_class: str) -> int:
+            """Map SVG class to YOLO class ID"""
+            svg_class_lower = svg_class.lower()
+            
+            # Check for walls
+            if "wall" in svg_class_lower or "space-boundary" in svg_class_lower:
+                target = "Wall"
+            # Check for doors
+            elif "door" in svg_class_lower:
+                target = "Door"
+            # Check for windows
+            elif "window" in svg_class_lower:
+                target = "Window"
+            # Check for columns
+            elif "column" in svg_class_lower or "pillar" in svg_class_lower:
+                target = "Column"
+            else:
+                return None
+            
+            # Apply merge rules (e.g., "Sliding Door" -> "Door")
+            if target in merge:
+                target = merge[target]
+            
+            # Return class ID if enabled
+            return class_to_id.get(target, None)
+        
+        # Helper to parse points string "x1,y1 x2,y2 ..." into normalized coords
+        def parse_points(points_str: str) -> List[float]:
+            """Parse SVG points attribute and normalize"""
+            coords = []
+            # Split by whitespace and commas
+            parts = points_str.replace(',', ' ').split()
+            for i in range(0, len(parts), 2):
+                if i + 1 < len(parts):
+                    x = float(parts[i]) / img_w
+                    y = float(parts[i + 1]) / img_h
+                    coords.extend([x, y])
+            return coords
+        
+        # Extract elements with and without namespace
+        for elem in root.iter():
+            tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            svg_class = elem.get('class', '')
+            
+            if not svg_class:
+                continue
+            
+            class_id = get_class_id(svg_class)
+            if class_id is None:
+                continue
+            
+            coords = []
+            
+            # Parse <polygon> elements
+            if tag == 'polygon':
+                points_str = elem.get('points', '')
+                if points_str:
+                    coords = parse_points(points_str)
+            
+            # Parse <rect> elements
+            elif tag == 'rect':
+                x = float(elem.get('x', 0))
+                y = float(elem.get('y', 0))
+                w = float(elem.get('width', 0))
+                h = float(elem.get('height', 0))
+                # Create polygon from rectangle
+                coords = [
+                    x / img_w, y / img_h,
+                    (x + w) / img_w, y / img_h,
+                    (x + w) / img_w, (y + h) / img_h,
+                    x / img_w, (y + h) / img_h
+                ]
+            
+            # Parse <line> elements (convert to thin polygon)
+            elif tag == 'line':
+                x1 = float(elem.get('x1', 0))
+                y1 = float(elem.get('y1', 0))
+                x2 = float(elem.get('x2', 0))
+                y2 = float(elem.get('y2', 0))
+                
+                # Create a thin rectangle around the line
+                thickness = 2  # pixels
+                dx = x2 - x1
+                dy = y2 - y1
+                length = (dx**2 + dy**2)**0.5
+                
+                if length > 0:
+                    # Perpendicular vector
+                    px = -dy / length * thickness / 2
+                    py = dx / length * thickness / 2
+                    
+                    # Four corners of the thin rectangle
+                    coords = [
+                        (x1 + px) / img_w, (y1 + py) / img_h,
+                        (x2 + px) / img_w, (y2 + py) / img_h,
+                        (x2 - px) / img_w, (y2 - py) / img_h,
+                        (x1 - px) / img_w, (y1 - py) / img_h
+                    ]
+            
+            # Parse <path> elements (basic support for simple paths)
+            elif tag == 'path':
+                d = elem.get('d', '')
+                # Simple path parsing - only handle M and L commands
+                if d:
+                    path_coords = []
+                    parts = d.replace(',', ' ').split()
+                    i = 0
+                    while i < len(parts):
+                        cmd = parts[i]
+                        if cmd in ['M', 'L'] and i + 2 < len(parts):
+                            try:
+                                x = float(parts[i + 1])
+                                y = float(parts[i + 2])
+                                path_coords.extend([x / img_w, y / img_h])
+                                i += 3
+                            except ValueError:
+                                i += 1
+                        else:
+                            i += 1
+                    
+                    if len(path_coords) >= 6:  # At least 3 points
+                        coords = path_coords
+            
+            # Add polygon if we have valid coordinates
+            if coords and len(coords) >= 6:  # At least 3 points (x,y pairs)
+                polygons.append((class_id, coords))
+    
+    except Exception as e:
+        logging.warning(f"Error parsing SVG {svg_path}: {e}")
+    
+    return polygons
 
 def convert_one(sample_img: Path, sample_svg: Path, out_img: Path, out_label: Path, class_cfg: Dict):
     """
-    TODO: Implement:
-    - read image to get width/height (cv2 or PIL)
+    Convert one CubiCasa5k sample to YOLO-seg format.
+    - read image to get width/height
     - parse svg -> polygons
     - copy image to out_img
     - write polygons to out_label (one line per instance)
     """
-    # Copy image (simple file copy)
-    out_img.write_bytes(sample_img.read_bytes())
-
-    # Placeholder label file
-    out_label.write_text("", encoding="utf-8")
+    try:
+        # Read image to get dimensions
+        img = Image.open(sample_img)
+        img_w, img_h = img.size
+        img.close()
+        
+        # Parse SVG to get polygons
+        polygons = svg_to_yolo_polygons(sample_svg, img_w, img_h, class_cfg)
+        
+        # Copy image to output directory
+        out_img.write_bytes(sample_img.read_bytes())
+        
+        # Write YOLO-seg format labels
+        label_lines = []
+        for class_id, coords in polygons:
+            # Format: class_id x1 y1 x2 y2 x3 y3 ...
+            coords_str = ' '.join(f"{c:.6f}" for c in coords)
+            label_lines.append(f"{class_id} {coords_str}")
+        
+        out_label.write_text('\n'.join(label_lines) + '\n' if label_lines else '', encoding="utf-8")
+        
+    except Exception as e:
+        logging.error(f"Error converting {sample_img}: {e}")
+        # Create empty label file on error
+        if not out_label.exists():
+            out_label.write_text("", encoding="utf-8")
 
 def find_samples(cubicasa_root: Path, img_ext: str) -> List[Tuple[Path, Path]]:
     """
-    TODO: CubiCasa5k 구조에 맞춰 이미지-주석(SVG) 쌍을 찾도록 수정.
-    아래는 '이미지와 동일한 stem의 .svg가 있다'는 가정으로 작성된 기본 검색기.
+    Find image-SVG pairs in CubiCasa5k directory structure.
+    
+    CubiCasa5k structure:
+    - high_quality/N/F1_scaled.png + model.svg
+    - high_quality_architectural/N/F1_scaled.png + model.svg
+    - colorful/N/F1_scaled.png + model.svg
+    
+    Returns list of (image_path, svg_path) tuples.
     """
     pairs = []
+    
+    # Look for model.svg files and find corresponding images
+    for svg_path in cubicasa_root.rglob("model.svg"):
+        # Look for F1_scaled.png in the same directory
+        img_dir = svg_path.parent
+        
+        # Try exact name first
+        img_path = img_dir / f"F1_scaled.{img_ext}"
+        if img_path.exists():
+            pairs.append((img_path, svg_path))
+            continue
+        
+        # Try pattern matching for similar names (F1_*, etc.)
+        found = False
+        for img_candidate in img_dir.glob(f"F*.{img_ext}"):
+            pairs.append((img_candidate, svg_path))
+            found = True
+            break
+        
+        # If still not found, try any image in the directory
+        if not found:
+            for img_candidate in img_dir.glob(f"*.{img_ext}"):
+                pairs.append((img_candidate, svg_path))
+                break
+    
+    # Also check for SVG files with same stem as images (fallback)
     for img_path in cubicasa_root.rglob(f"*.{img_ext}"):
         svg_path = img_path.with_suffix(".svg")
-        if svg_path.exists():
+        if svg_path.exists() and (img_path, svg_path) not in pairs:
             pairs.append((img_path, svg_path))
+    
+    logging.info(f"Found {len(pairs)} image/svg pairs")
     return pairs
 
 def split_pairs(pairs: List[Tuple[Path, Path]], train_ratio: float = 0.9):
