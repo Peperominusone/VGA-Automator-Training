@@ -30,6 +30,9 @@ from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
+# Constants
+LINE_THICKNESS_PIXELS = 2  # Thickness for converting SVG lines to polygons
+
 def load_class_config(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -161,15 +164,14 @@ def svg_to_yolo_polygons(svg_path: Path, img_w: int, img_h: int, class_cfg: Dict
                 y2 = float(elem.get('y2', 0))
                 
                 # Create a thin rectangle around the line
-                thickness = 2  # pixels
                 dx = x2 - x1
                 dy = y2 - y1
                 length = (dx**2 + dy**2)**0.5
                 
                 if length > 0:
                     # Perpendicular vector
-                    px = -dy / length * thickness / 2
-                    py = dx / length * thickness / 2
+                    px = -dy / length * LINE_THICKNESS_PIXELS / 2
+                    py = dx / length * LINE_THICKNESS_PIXELS / 2
                     
                     # Four corners of the thin rectangle
                     coords = [
@@ -189,7 +191,7 @@ def svg_to_yolo_polygons(svg_path: Path, img_w: int, img_h: int, class_cfg: Dict
                     i = 0
                     while i < len(parts):
                         cmd = parts[i]
-                        if cmd in ['M', 'L'] and i + 2 < len(parts):
+                        if cmd in ['M', 'L'] and i + 1 < len(parts) - 1:
                             try:
                                 x = float(parts[i + 1])
                                 y = float(parts[i + 2])
@@ -257,6 +259,10 @@ def find_samples(cubicasa_root: Path, img_ext: str) -> List[Tuple[Path, Path]]:
     - colorful/N/F1_scaled.png + model.svg
     
     Returns list of (image_path, svg_path) tuples.
+    
+    Note: When multiple images match a pattern in a directory with an SVG,
+    only the first match is selected. This is by design to handle cases where
+    multiple image versions exist in the same directory.
     """
     pairs = []
     
@@ -272,6 +278,7 @@ def find_samples(cubicasa_root: Path, img_ext: str) -> List[Tuple[Path, Path]]:
             continue
         
         # Try pattern matching for similar names (F1_*, etc.)
+        # Note: Only the first match is selected when multiple images exist
         found = False
         for img_candidate in img_dir.glob(f"F*.{img_ext}"):
             pairs.append((img_candidate, svg_path))
