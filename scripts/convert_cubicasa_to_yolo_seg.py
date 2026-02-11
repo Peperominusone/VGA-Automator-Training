@@ -38,6 +38,7 @@ def ensure_dirs(out_root: Path, split: str):
     (out_root / "labels" / split).mkdir(parents=True, exist_ok=True)
 
 def write_data_yaml(out_root: Path, names: List[str]):
+    out_root.mkdir(parents=True, exist_ok=True)
     data = {
         "path": str(out_root),
         "train": "images/train",
@@ -98,10 +99,6 @@ def svg_to_yolo_polygons(svg_path: Path, img_w: int, img_h: int, class_cfg: Dict
             else:
                 return None
             
-            # Apply merge rules (e.g., "Sliding Door" -> "Door")
-            if target in merge:
-                target = merge[target]
-            
             # Return class ID if enabled
             return class_to_id.get(target, None)
         
@@ -120,8 +117,12 @@ def svg_to_yolo_polygons(svg_path: Path, img_w: int, img_h: int, class_cfg: Dict
         
         # Extract elements with and without namespace
         for elem in root.iter():
+            # Skip comments and other non-element nodes
+            if not isinstance(elem.tag, str):
+                continue
+            
             tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-            svg_class = elem.get('class', '')
+            svg_class = elem.get('class')
             
             if not svg_class:
                 continue
